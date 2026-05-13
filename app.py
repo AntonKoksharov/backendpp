@@ -4,10 +4,10 @@ import httpx
 import asyncio
 import sys
 import io
+import math
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
-from sentence_transformers import SentenceTransformer, util
 
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -22,13 +22,40 @@ app.add_middleware(
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GITHUB_REPO = "https://kb-api-server.onrender.com" 
+GITHUB_REPO = "AntonKoksharov/backendpp"
 GITHUB_PATH = "docs" 
 DB_FILE = "vector_db.json"
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-embed_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 vector_db = {}
+
+#ЛЕГКАЯ МАТЕМАТИКА ВМЕСТО ТЯЖЕЛЫХ БИБЛИОТЕК
+
+def get_embeddings_batch(texts):
+    """Отправляет пачку текста в Google для векторизации"""
+    response = client.models.embed_content(
+        model='gemini-embedding-2',
+        contents=texts
+    )
+    return [e.values for e in response.embeddings]
+
+def get_embedding_single(text):
+    """Векторизует один вопрос пользователя"""
+    response = client.models.embed_content(
+        model='gemini-embedding-2',
+        contents=text
+    )
+    return response.embeddings[0].values
+
+def cosine_similarity(v1, v2):
+    """Вычисляет похожесть без использования тяжелых библиотек"""
+    dot_product = sum(a * b for a, b in zip(v1, v2))
+    magnitude1 = math.sqrt(sum(a * a for a in v1))
+    magnitude2 = math.sqrt(sum(b * b for b in v2))
+    if magnitude1 == 0 or magnitude2 == 0: return 0.0
+    return dot_product / (magnitude1 * magnitude2)
+
+#ОСНОВНАЯ ЛОГИКА 
 
 async def sync_github_docs():
     print("Начало синхронизации с GitHub...")
@@ -50,9 +77,12 @@ async def sync_github_docs():
                     if f_resp.status_code == 200:
                         text = f_resp.text
                         chunks = [text[i:i+600] for i in range(0, len(text), 500)]
-                        vectors = embed_model.encode(chunks).tolist()
-                        vector_db[file["path"]] = {"chunks": chunks, "vectors": vectors}
-                        updated = True
+                        
+                        if chunks:
+                            # Просим Gemini векторизовать текст (работает за миллисекунды)
+                            vectors = await asyncio.to_thread(get_embeddings_batch, chunks)
+                            vector_db[file["path"]] = {"chunks": chunks, "vectors": vectors}
+                            updated = True
             
             if updated:
                 with open(DB_FILE, "w", encoding="utf-8") as f:
@@ -63,6 +93,10 @@ async def sync_github_docs():
 
 @app.on_event("startup")
 async def startup():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            global vector_db
+            vector_db = json.load(f)
     await sync_github_docs()
 
 @app.post("/ask")
@@ -73,18 +107,27 @@ async def ask_endpoint(request: Request):
     if not question:
         return {"answer": "Вопрос не введен."}
 
-    query_vec = embed_model.encode(question)
+    try:
+        # 1. Векторизуем вопрос пользователя через Google
+        query_vec = await asyncio.to_thread(get_embedding_single, question)
+    except Exception as e:
+         return {"answer": f"Ошибка векторизации вопроса: {str(e)}"}
+
+    # 2. Ищем совпадения локально с помощью легкой математики
     matches = []
     for data in vector_db.values():
-        scores = util.cos_sim(query_vec, data["vectors"])[0]
-        for i, s in enumerate(scores):
-            if s > 0.35:
-                matches.append(data["chunks"][i])
+        for i, chunk_vec in enumerate(data["vectors"]):
+            score = cosine_similarity(query_vec, chunk_vec)
+            if score > 0.5: # Порог похожести
+                matches.append({"text": data["chunks"][i], "score": score})
     
-    context = "\n".join(matches[:3])
+    matches = sorted(matches, key=lambda x: x["score"], reverse=True)
+    context = "\n".join([m["text"] for m in matches[:3]])
+    
     if not context:
         return {"answer": "В базе знаний нет информации по этому вопросу."}
 
+    # 3. Отправляем контекст в ИИ
     prompt = f"Используй текст ниже для ответа:\n{context}\n\nВопрос: {question}"
     try:
         response = await asyncio.to_thread(
