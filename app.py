@@ -22,8 +22,8 @@ app.add_middleware(
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GITHUB_REPO = "AntonKoksharov/backendpp"
-GITHUB_PATH = "docs" 
+GITHUB_REPO = "luquii2/Knowledge-Base"
+GITHUB_PATH = "places" 
 DB_FILE = "vector_db.json"
 
 client = genai.Client(api_key=GEMINI_API_KEY)
