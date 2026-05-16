@@ -8,6 +8,7 @@ import math
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
+from google.genai import types
 
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -133,8 +134,17 @@ async def ask_endpoint(request: Request):
         response = await asyncio.to_thread(
             client.models.generate_content,
             model='gemini-2.5-flash',
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=4096,
+            )
         )
+
         return {"answer": response.text}
     except Exception as e:
         return {"answer": f"Ошибка ИИ: {str(e)}"}
+
+#Подключен сервис, который не даст заснуть серверу.
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Сервер не спит!"}
