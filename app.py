@@ -10,6 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import types
 
+### НОВОЕ: Импортируем BaseModel для проверки входящих данных ###
+from pydantic import BaseModel
+
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
@@ -22,13 +25,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- СЕКРЕТЫ И НАСТРОЙКИ ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+### НОВОЕ: Безопасно достаем токены Telegram из переменных окружения ###
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
 GITHUB_REPO = "luquii2/Knowledge-Base"
 GITHUB_PATH = "places" 
 DB_FILE = "vector_db.json"
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 vector_db = {}
+
+### НОВОЕ: Модель данных для обратной связи ###
+class FeedbackRequest(BaseModel):
+    name: str
+    contact: str
+    message: str
 
 #ЛЕГКАЯ МАТЕМАТИКА ВМЕСТО ТЯЖЕЛЫХ БИБЛИОТЕК
 
@@ -129,7 +144,6 @@ async def ask_endpoint(request: Request):
         return {"answer": "В базе знаний нет информации по этому вопросу."}
 
     # 3. Отправляем контекст в ИИ
-    # 3. Отправляем контекст в ИИ
     prompt = f"""Используй предоставленный текст для формирования ответа на вопрос пользователя. 
 Если в данном тексте нет нужной информации, то просто напиши, что ты не знаешь ответа. 
 Каждый свой ответ обязательно начинай с фразы: 'Вот что удалось найти по вашему вопросу:'
@@ -152,7 +166,39 @@ async def ask_endpoint(request: Request):
     except Exception as e:
         return {"answer": f"Ошибка ИИ: {str(e)}"}
 
-#Подключен сервис, который не даст заснуть серверу.
+
+### НОВОЕ: Эндпоинт для отправки формы в Telegram ###
+@app.post("/api/feedback")
+async def send_feedback(feedback: FeedbackRequest):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"ok": False, "message": "Не настроены токены Telegram на сервере."}
+
+    tg_message = (
+        f"<b>Новое сообщение с сайта!</b>\n\n"
+        f"<b>Имя:</b> {feedback.name}\n"
+        f"<b>Контакты:</b> {feedback.contact}\n"
+        f"<b>Сообщение:</b>\n{feedback.message}"
+    )
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": tg_message,
+        "parse_mode": "HTML"
+    }
+
+    async with httpx.AsyncClient() as http_client:
+        try:
+            resp = await http_client.post(url, json=payload)
+            if resp.status_code == 200:
+                return {"ok": True}
+            else:
+                return {"ok": False, "message": f"Ошибка Telegram: {resp.text}"}
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
+
+# Подключен сервис, который не даст заснуть серверу.
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "Сервер не спит!"}
